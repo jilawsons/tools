@@ -1,0 +1,70 @@
+#!/bin/bash
+
+#DBG
+#set -x 
+
+keyword=$1
+scrdir="$2"
+
+if [[ -z $keyword ]] ; then 
+    keyword=admin
+fi
+if [[ -z $scrdir ]] ; then 
+    scrdir=$HOME/scripts
+    mkdir -p "$scrdir"
+fi
+scrdir="${scrdir%/}"
+
+function mydate {
+    date +%Y%m%d-%H%M%S
+}
+function mygetserial {
+    local kw=$1
+    local scdir="$2"
+    #DBG 
+    #echo "kw $kw" 1>&2
+    #echo "scdir $scdir" 1>&2
+    local lastfile="$(find "$scdir" -maxdepth 1 -type f -name "[0-9]*-$kw-*.script" -print | sed -e "s|$scdir/||" | grep -E "^[[:digit:]]+-$kw" | sort -n | tail -1 | tr -d '\n')"
+    local sn=1
+    #DBG 
+    #echo "lf '$lastfile'"
+    #echo -n "lf "
+    #echo "$lastfile" | od -x
+    if [[ ! -z $lastfile ]] ; then
+        #DBG
+        #echo "lastfile $lastfile" 1>&2
+        #local lsn=$(echo $lastfile | sed -e 's|^\([0-9]\+\).*|\1|')
+        local lsn=${lastfile:0:5}
+        #DBG
+        #echo "lsn $lsn"
+        sn=$(expr $lsn + 1)
+    fi
+    #DBG
+    #echo "sn $sn"
+    local snf="$(printf %05d $sn)"
+    echo $snf
+}
+
+export MYSCRIPTSERIAL=$(mygetserial $keyword "$scrdir")
+export MYSCRIPTID=$MYSCRIPTSERIAL-$keyword
+export MYSCRIPTFILE="$scrdir/$MYSCRIPTID-$(mydate).script"
+export MYHISTORYFILE="$MYSCRIPTFILE.history"
+export MYFMTHISTORYFILE="$MYHISTORYFILE.formatted"
+
+export HISTFILE="$MYHISTORYFILE"
+export HISTFILESIZE=100000
+export HISTTIMEFORMAT='%F %T '
+export HISTSIZE=100000
+
+export PS1="[$MYSCRIPTID-script \u@\h \W]\## "
+
+function myscriptexit {
+    history -r "$MYHISTORYFILE"
+    history > "$MYFMTHISTORYFILE"
+}
+
+trap myscriptexit EXIT
+
+script "$MYSCRIPTFILE"
+
+exit

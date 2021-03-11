@@ -1,0 +1,95 @@
+# set prefix key to ctrl+t
+unbind C-b
+set -g prefix C-t
+
+# send the prefix to the second level client
+bind-key -n C-j send-prefix
+
+# send the prefix to the third level client
+bind-key -n C-y send-keys C-j
+
+# like screen
+bind-key A command-prompt 'rename-window %%'
+bind '"' choose-window
+
+# Make history large (100k)
+set -g history-limit 100000
+ 
+# improve colors
+set -g default-terminal "screen-256color"
+ 
+# no time between prefix and command
+set -s escape-time 0
+ 
+# send command to nested tmux with a C-t t
+bind-key t send-prefix
+ 
+# last window with C-t C-t
+bind-key C-t last-window
+ 
+# use | and - for split screen
+bind | split-window -h
+bind - split-window -v
+ 
+# act more like vim
+setw -g mode-keys vi
+bind h select-pane -L
+bind j select-pane -D
+bind k select-pane -U
+bind l select-pane -R
+ 
+# resize panes
+bind H resize-pane -L 10
+bind J resize-pane -D 10
+bind K resize-pane -U 10
+bind L resize-pane -R 10
+ 
+# Make this the current window
+bind T swap-window -t 1
+ 
+# Reloading tmux configurations
+bind R source-file ~/.tmux.conf \; display-message "Config reloaded..."
+ 
+# Setup Status bar
+set-option -g status on
+ 
+# don't want clock tripping us up
+set -g visual-activity off
+set -g monitor-activity off
+
+# set color for status bar
+set-option -g status-bg colour235  #base02
+set-option -g status-fg colour136 #yellow
+set-option -g status-attr default
+ 
+# show hostname
+set -g status-left-length 30
+set -g status-left "#[fg=green][ #h ]"
+ 
+# set window list colors - red for active and cyan for inactive
+set-window-option -g window-status-fg colour244 # #base0
+set-window-option -g window-status-bg default
+set-window-option -g window-status-attr dim
+ 
+# Active window title colors
+set-window-option -g window-status-current-fg colour166 #orange
+set-window-option -g window-status-current-bg default #grey
+# set-window-option -g window-status-current-attr bright
+ 
+# show session name, window & pane number, date and time on right side
+set -g status-right-length 60
+set -g status-right "#[fg=brightblue]#S #I:#P #[fg=yellow]:: %d %b %Y #[fg=green]:: %l:%M %p ::"
+ 
+# pane border
+set-option -g pane-border-fg colour230 #base02
+set-option -g pane-active-border-fg colour166 #base01
+ 
+# pane number display
+set-option -g display-panes-active-colour colour33 #blue
+set-option -g display-panes-colour colour166 #orange
+ 
+# clock
+set-window-option -g clock-mode-colour green #green
+
+# prevent window rename
+set-option -g allow-rename off
