@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# get absolute directory for this blog1 library file
+bl1_dir="$(bl1_rdir="$(dirname "$BASH_SOURCE")"; cd "$bl1_rdir"; pwd)"
+
+. "${bl1_dir}/butil1"
+
+export BLOG1="${BLOG1:-$HOME/.blog1/$global_exename-$(tstamp).log}"
+export BLOG1_DBGLVL="${BLOG1_DBGLVL:-0}"
+export BLOG1_QUIET=${BLOG1_QUIET:-false}
+export BLOG1_VERBOSE=${BLOG1_VERBOSE:-false}
+
+mkdir -p "$(dirname "$BLOG1")"
+
+function set_log {
+    export BLOG1="$1"
+}
+function set_log_debug {
+    local dbglvl=$1
+    if [[ ! $dbglvl =~ ^[0-6]$ ]] ; then
+        log_warn "Forcing log debug level to 0 since invalid value $dbglvl was requested."
+        dbglvl=0
+    fi
+    export BLOG1_DBGLVL="$dbglvl"
+}
+function set_log_verbosity {
+    local verbosity="$1"
+    if [[ $verbosity != quiet && $verbosity != verbose ]] ; then
+        verbosity=normal
+    fi
+    if [[ $verbosity == quiet ]] ; then
+        export BLOG1_QUIET=true
+    else
+        export BLOG1_QUIET=false
+    fi
+    if [[ $verbosity == verbose ]] ; then
+        export BLOG1_VERBOSE=true
+    else
+        export BLOG1_VERBOSE=false
+    fi
+}
+
+function logstamp {
+   date "+%Y%m%d %H:%M:%S.%N"
+}
+
+function echoToFdBasedOnType {
+    local mtype="$1"
+    local msg="$2"
+    if [[ $mtype == WARN || $mtype == ERROR || $mtype == DEBUG || $mtype == FATAL ]] ; then
+        echo -e "$msg" 1>&2
+    else
+        echo -e "$msg"
+    fi
+}
+
+function bl1PrintToLog {
+    local mtype="$1" ; shift
+    local msg="$@"
+
+    echo -e "$msg" >> "$BLOG1"
+    if $BLOG1_QUIET ; then
+         return
+    fi
+    if $BLOG1_VERBOSE ; then
+         echoToFdBasedOnType "$mtype" "$msg"
+    elif [[ $mtype != INFO ||
+            $mtype == PRINT ]] ; then
+         echoToFdBasedOnType "$mtype" "$msg"
+    fi
+}
+
+function bl1CallStack () {
+  local STACK=
+  i=${#FUNCNAME[@]}
+  ((--i))
+  while (( $i > 0 ))
+  do
+    STACK+="${BASH_SOURCE[$i]}.${FUNCNAME[$i]}:${BASH_LINENO[$i-1]}\n"
+    ((--i))
+  done
+  bl1PrintToLog INFO "$STACK"
+}
+
+function bl1log {
+    local mtype="$1" ; shift
+    local msg="$@"
+
+    tstamp=$(logstamp)
+
+    outline="$(printf "%-21.21s  %-8.8s %s\n" "$tstamp" "$mtype" "$msg")"
+
+    bl1PrintToLog $mtype "$outline"
+
+    if [[ $mtype == FATAL ]] ; then
+        bl1CallStack
+    fi
+}
+
+function log {
+    local msg="$@"
+    log_info "$msg"
+}
+function log_info {
+    local msg="$@"
+    bl1log INFO "$msg"
+}
+function log_error {
+    local msg="$@"
+    bl1log ERROR "$msg"
+}
+function log_warn {
+    local msg="$@"
+    bl1log WARN "$msg"
+}
+function log_print {
+    local msg="$@"
+    bl1log PRINT "$msg"
+}
+function log_stack {
+    bl1CallStack
+}
+function log_debug {
+    local dbglvl=$1 ; shift
+    local msg="$@"
+    if [[ $dbglvl -le $BLOG1_DBGLVL ]] ; then
+        bl1log DEBUG "$msg"
+    fi
+}
+function log_fatal {
+    local exitcode=$1
+    if [[ ! $exitcode =~ ^[0-9]+$ ]] ; then
+        exitcode=1
+    else
+        shift
+    fi
+    local msg="$@"
+    if [[ -z $msg ]] ; then
+        msg="log_fatal called with no message provided."
+    fi
+    bl1log FATAL "$msg"
+    exit $exitcode
+}
+

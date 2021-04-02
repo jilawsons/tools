@@ -1,0 +1,941 @@
+#!/bin/bash
+
+# get original arguments
+declare -a global_origargs=("$@")
+
+# get directory for this script
+global_exedir=$(cd $(dirname "$0"); pwd)
+global_exeparent="$(basename "$global_exedir")"
+global_exename="$(basename "$0")"
+global_exepath="$global_exedir/$global_exename"
+global_cmdline="$*"
+
+# TIMESTAMP
+export global_starttime=$(date +%Y%m%d-%H%M%S-%N)
+export global_starttime_seconds=$(date +%s)
+export global_tmplate_name="${global_exename}-${global_starttime}"
+export global_tmplate_prefix="/tmp/${global_tmplate_name}"
+export global_tmplate="${global_tmplate_prefix}-XXXXXX"
+#export global_run_root="$HOME/.run"
+export global_run_root="/dev/shm"
+
+function tstamp {
+    echo $(date +%Y%m%d%H%M%S)
+}
+
+function tstampns {
+    echo $(date +%Y%m%d%H%M%S.%N)
+}
+
+starttime=$(tstamp)
+startdate=${starttime:0:8}
+
+# use to generate a temp file name that is automatically 
+# deleted upon script exit
+# e.g. 
+# myfile=$(blmktemp)
+# echo "foo" > $myfile
+function blmktemp {
+    local opt="$1"
+    if [[ -z $opt ]] ; then
+        mktemp "$global_tmplate"
+    elif [[ $opt == -d ]] ; then
+        mktemp -d "$global_tmplate"
+    else
+        echo "invalid argument $opt to blmktemp; exiting"
+        exit 1
+    fi
+}
+
+# use to generate a user run directory that is optionally maintained
+# and reported upon script exit
+# e.g. 
+# This creates a run directory which will be removed
+# myrund=$(blmkrun)
+# This creates a run directory which will persist
+# myrund=$(blmkrun -k)
+
+global_rundir=
+global_rundir_keep=false
+function blmkrun {
+    if [[ -d $global_rundir ]] ; then
+        echo "$global_rundir"
+        return 0
+    fi
+    # default rundir name
+    global_rundir="$global_run_root/$global_tmplate_name"
+    local opt="$1"
+    if [[ ! -z $opt && $opt == '-k' ]] ; then
+        global_rundir_keep=true
+        # we are keeping the rundir so check to see if we 
+        # want a custom name
+        tmprundir="$2"
+        if [[ ! -z $tmprundir ]] ; then
+            global_rundir="$global_run_root/$tmprundir"
+        fi
+    fi
+    myglobal global_rundir "$global_rundir"
+    myglobal global_rundir_keep "$global_rundir_keep"
+    mkdir -p "$global_rundir" 
+    if [[ -d $global_rundir ]] ; then
+        echo "$global_rundir"
+        return 0
+    fi
+    echo "Failed to create '$global_rundir'; exiting"
+    exit 1
+}
+
+global_globalsfile=$(blmktemp)
+function myglobal {
+     local var=$1
+     local val="$2"
+     echo "$var='$val'" >> $global_globalsfile
+}
+function getglobals {
+    . $global_globalsfile
+}
+
+
+trap myexit EXIT SIGINT SIGSTOP SIGKILL
+
+# to be called only by trap or other signal
+# just use exit as normal in you scripts
+function myexit {
+    exitcode=$?
+    getglobals
+    rm -rf "$global_tmplate_prefix"*
+    if [[ -d $global_rundir ]] ; then
+        if $global_rundir_keep ; then
+            echo "Keeping run directory: '$global_rundir'; it may be useful for later monitoring and cleanup"
+        else
+            rm -rf "$global_rundir"
+        fi
+    fi
+    exit $exitcode
+}
+
+############ SCRIPT ARGUMENT PROCESSING TOOLS
+function usage {
+
+    echo "$(cat <<EOF
+$global_usageText
+EOF
+)"
+
+    if [[ x"$1" != x"" ]] ; then
+        echo
+        echo "$1"
+        echo
+    fi
+
+    echo
+    exit 1
+}
+
+############ END SCRIPT ARGUMENT PROCESSING TOOLS
+
+# use to assign a heredoc without cat
+# e.g.
+# define VAR <<'EOF'
+# foo
+# EOF
+define(){ IFS='\n' read -r -d '' ${1} || true; }
+
+
+# Call this function if you want to finish the script with the call;
+# otherwise use the 'rwt' function below which wraps it in a subshell
+function exec_with_timeout {
+    # This function adapted from:
+    # http://www.bashcookbook.com/bashinfo/source/bash-4.0/examples/scripts/timeout3
+    # found here:
+    # http://stackoverflow.com/questions/5615570/in-a-script-vs-in-a-subshell
+    # Adaptation required to allow it to run 
+    #
+    # The Bash shell script executes a command with a time-out.
+    # Upon time-out expiration SIGTERM (15) is sent to the process. If the signal
+    # is blocked, then the subsequent SIGKILL (9) terminates it.
+    #
+    # Based on the Bash documentation example.
+    
+    # Hello Chet,
+    # please find attached a "little easier"  :-)  to comprehend
+    # time-out example.  If you find it suitable, feel free to include
+    # anywhere: the very same logic as in the original examples/scripts, a
+    # little more transparent implementation to my taste.
+    #
+    # Dmitry V Golovashkin <Dmitry.Golovashkin@sas.com>
+    
+    local DEFAULT_TIMEOUT=9
+    local DEFAULT_INTERVAL=1
+    local DEFAULT_DELAY=1
+    local DEFAULT_CLEANUP=""
+    
+    # Timeout.
+    local timeout=$DEFAULT_TIMEOUT
+    # Interval between checks if the process is still alive.
+    local interval=$DEFAULT_INTERVAL
+    # Delay between posting the SIGTERM signal and destroying the process by SIGKILL.
+    local delay=$DEFAULT_DELAY
+    # Default cleanup string to eval if command times out
+    local cleanup="$DEFAULT_CLEANUP"
+    
+    function exec_with_timeout_printUsage() {
+        cat <<EOF
+    
+    Synopsis
+        exec_with_timeout [-t timeout] [-i interval] [-d delay] command
+        Execute a command with a time-out.
+        Upon time-out expiration SIGTERM (15) is sent to the process. If SIGTERM
+        signal is blocked, then the subsequent SIGKILL (9) terminates it.
+    
+        -t timeout
+            Number of seconds to wait for command completion.
+            Default value: $DEFAULT_TIMEOUT seconds.
+    
+        -i interval
+            Interval between checks if the process is still alive.
+            Positive integer, default value: $DEFAULT_INTERVAL seconds.
+    
+        -d delay
+            Delay between posting the SIGTERM signal and destroying the
+            process by SIGKILL. Default value: $DEFAULT_DELAY seconds.
+    
+        -c cleanupstring
+            Bash command string to eval if the command times out.
+            Default value is an empty string (which does nothing)
+    
+    As of today, Bash does not support floating point arithmetic (sleep does),
+    therefore all delay/time values must be integers.
+
+    NOTE: This function does not appear to work when called from within 
+    a command substitution command (so the use of this within backticks 
+    or the <dollar>() construct does not seem to work (not sure why but
+    the subshell hangs at the first assignment of t; may be a bash bug
+    I saw referenced about parens within a command substitution).
+EOF
+    }
+    
+    # Options.
+    while getopts ":t:i:d:c:" option; do
+        case "$option" in
+            t) timeout=$OPTARG ;;
+            i) interval=$OPTARG ;;
+            d) delay=$OPTARG ;;
+            c) cleanup=$OPTARG ;;
+            *) exec_with_timeout_printUsage; exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+    
+    # $# should be at least 1 (the command to execute), however it may be strictly
+    # greater than 1 if the command itself has options.
+    if (($# == 0 || interval <= 0)); then
+        exec_with_timeout_printUsage
+        exit 1
+    fi
+    
+    # kill -0 pid   Exit code indicates if a signal may be sent to $pid process.
+    local MYPID=$(sh -c 'echo $PPID')
+    (
+        local t
+        ((t = timeout))
+    
+        while ((t > 0)); do
+            sleep $interval
+            kill -0 $MYPID || exit 0
+            ((t -= interval))
+        done
+    
+        # Be nice, post SIGTERM first.
+        # The 'exit 0' below will be executed if any preceeding command fails.
+        kill -s SIGTERM $MYPID && kill -0 $MYPID || exit 0
+        sleep $delay
+        kill -s SIGKILL $MYPID
+        eval "$cleanup"
+    ) 2> /dev/null &
+    
+    exec "$@"
+}
+# export for use in items like find -exec
+export -f exec_with_timeout
+# implements exec_with_timeout in a subshell
+function rwt {
+    (exec_with_timeout "$@")
+}
+# export for use in items like find -exec
+export -f rwt
+# implements exec_with_timeout in a subshell
+function run_with_timeout {
+    (exec_with_timeout "$@")
+}
+# export for use in items like find -exec
+export -f run_with_timeout
+
+################################################################################
+# time stuff
+function getetime {
+    echo -n $(date +%s)
+}
+function timeexpired {
+    local starttime="$1"
+    local period="$2"
+    local now=$(getetime)
+    # silenetly fail for non numeric args
+    if [[ ! $starttime =~ ^[0-9]+$ || ! $period =~ ^[0-9]+$ ]] ; then
+        return 1
+    fi
+    exptime=$(( $starttime + $period ))
+    if [[ $exptime -le $now ]] ; then
+        return 0
+    fi
+    return 1
+}
+################################################################################
+# file descriptor and fifo management
+function getfreefd {
+    for fd in $(seq 3 100) ; do
+        if ! { exec 0>&$fd; } 1>/dev/null 2>&1; then
+            echo $fd
+            return
+        fi
+    done
+    echo "No free file descriptors found" 1>&2
+    exit 1
+}
+
+# return a file descriptor for a fifo that can be used
+# to collect stdout from functions in two statements wihtout a subshell
+# instead of in one with a subshell (so that the function may use global
+# variables).
+# E.g.: 
+#    myvar=$(myfunc)
+# can be changed to:
+#   Setup:
+#    tmpfd=$(blmktemp)
+#    getfifofd > $tmpfd
+#    ffd=$(cat $tmpfd)
+#   Usage:
+#    myfunc 1>&$ffd
+#    read -u$ffd myvar
+# NOTE: the above usage will only read the first line of myfunc output
+#    so if there are multiple lines, the rest will still be in the FIFO.
+#    
+function getfifofd {
+    local ffile=$(blmktemp)
+    local fd=$(getfreefd)
+    rm -f $ffile
+    mkfifo $ffile
+    eval "exec $fd<> $ffile"
+    unlink $ffile
+    echo $fd
+}
+
+################################################################################
+# read and parse a file using standard conventions
+# to eliminate comments (i.e. ones where first non-blank char is '#')  
+# and blank lines; echo the remaining output to stdout
+#
+# Not sure what situations would really require use of another
+# fd instaed of just a local redirect, but it looks kinda cool ;)
+#
+function parseFile {
+    local inputfile="$1"
+    if [[ ! -f "$inputfile" ]] ; then
+        # return with warning if file does not exist
+        echo "parseFile cannot parse non-existent file: '$inputfile'" 1>&2
+        return
+    fi
+    ( 
+    local PFFD=$(getfreefd)
+    eval "exec $PFFD< '$inputfile'"
+    while read -r -u $PFFD line ; do
+        if [[ $line == '' ||
+              $line =~ [[:space:]]*# ]] ; then
+            continue
+        fi
+        echo $line
+    done
+    # close inputfile
+    eval "exec $PFFD>&-"
+    )
+}
+# export for use in items like find -exec
+export -f parseFile
+
+# susbstitute a specified value for all instances of each
+# of a set of variables in a subtree of files 
+# The strings to be replaced are made more unique by
+# including a prepend before each variable name (only
+# strings that are "<prepend><varname>" are substituted
+# with the value.
+# The first argument is the $prefix
+# The second ($subfile) is the path to a file containing
+#   shell variable definitions (maps #    variables to values)
+# The third argument is a directory or file which is the root
+#   of a find for all files underneath to substitute for
+#   (so, to sub in just one file, use that path, and
+#   for a directory, make sure that all files in it 
+#   and any subdirectories are ones you want to susbtitute fo
+#
+# An alternative prefix is "<>" which implies that instead 
+# of a prefix only, there is a prefix ('<') and a suffix ('>')
+# for the vars
+function dosubs {
+    local prefix="$1"
+    local subfile="$2"
+    local workpath="$3"
+
+    local vars="$(cut -f1 -d= "$subfile" | xargs)"
+
+    . "$subfile"
+
+    local subvar
+    local subval
+    for var in $vars ; do
+        if [[ $prefix == '<>' ]] ; then
+            subvar="<$var>"
+        else
+            subvar="${prefix}$var"
+        fi
+        subval="${!var}"
+        find "$workpath" -type f -print0 | while IFS= read -r -d $'\0' f; do
+            sed -i -e "s|$subvar|$subval|g" $f
+        done
+    done
+}
+
+
+################################################################################
+
+# check if item is member of list
+# where list is bash list or remaining args 
+function listMember {
+    local checkitem="$1"; shift;
+    local list="$@"
+    local res=1
+    local item
+    for item in $list ; do 
+        fixeditem="$(echo "$item" | tr -d '\r')"
+        if [[ x"$checkitem" == x"$fixeditem" ]] ; then
+            res=0
+            break
+        fi
+    done
+    return $res
+}
+# export for use in items like find -exec
+export -f listMember
+
+# remove item from list and return new list
+# where list is bash list or remaining args 
+function removeFromList {
+    local removeitem="$1"; shift;
+    local list="$@"
+    local newlist=""
+    local item
+    for item in $list ; do 
+        if [[ x"$removeitem" == x"$item" ]] ; then
+            continue
+        fi
+        newlist="$newlist $item"
+    done
+    echo -n $newlist
+}
+# export for use in items like find -exec
+export -f removeFromList
+
+function listCount {
+    local list="$@"
+    local count=0
+    local i
+    for i in $list ; do
+        count=$(( $count + 1 ))
+    done
+    echo -n $count
+}
+export -f listCount
+
+function listSort {
+    local sortargs="$1"
+    local list="$@"
+    local tmpfile1=$(blmktemp)
+    local tmpfile2=$(blmktemp)
+    echo "$list" > $tmpfile1
+    eval sort $sortargs $tmpfile1 > $tmpfile2
+    output=$(while read line ; do
+        echo -n "$line "
+    done < $tmpfile2)
+    echo "${output:0:-1}"
+}
+
+# takes the names of 2 arrays (passed as 'array[@]') and returns a list of items that 
+# appear in both 
+function intersection {
+    local -a list1=( "${!1}" )
+    local -a list2=( "${!2}" )
+    local -a ints=()
+    local item1
+    for item1 in "${list1[@]}" ; do
+        if listMember "$item1" "${list2[@]}" ; then
+            ints+=("$item1")
+        fi
+    done
+    echo "${ints[@]}"
+}
+# export for use in items like find -exec
+export -f intersection
+
+################################################################################
+function rtrim {
+    local string="$1"
+    echo "$string" | sed -e 's|[[:space:]]*$||'
+}
+export -f rtrim
+
+function ltrim {
+    local string="$1"
+    echo "$string" | sed -e 's|^[[:space:]]*||'
+}
+export -f ltrim
+
+function trim {
+    local string="$1"
+    echo "$string" | sed -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||'
+}
+export -f trim
+
+################################################################################
+
+# passes argument to date -d <arg> +%s and 
+# returns the result 
+# this gives you seconds from the epoch
+# from strings like:
+#  "6/21/15 01:00"
+#  "-1 day"
+function epochTimeFromDateReference() {
+    local dateref="$1"
+    local res=$(date -d "$dateref" +%s)
+    echo $res
+}
+
+# from a date -d string, create a pair of 
+# arguments for find to limit the results
+# to files modified since that time
+function findFromArgs() {
+    local dateref="$1"
+    local fromseconds=$(epochTimeFromDateReference "$dateref")
+    local now=$(date +%s)
+    local frommin=$(( ( $now - $fromseconds - 60 ) / 60 ))
+    local fromargs="-mmin -$frommin"
+    echo "$fromargs"
+}
+
+# from a date -d string, create a pair of 
+# arguments for find to limit the results
+# to files modified before that time
+function findToArgs() {
+    local dateref="$1"
+    local toseconds=$(epochTimeFromDateReference "$dateref")
+    local now=$(date +%s)
+    local tomin=$(( ( $now - $toseconds + 60 ) / 60 ))
+    local toargs="-mmin +$tomin"
+    echo "$toargs"
+}
+
+
+# enables caller to avoid simultaneous runs
+# (with an optional timeout) for waiting for the previous
+# run to finish
+# A second argument may be provided which will lock
+# only for other runs of the script which pass
+# the same argument (this will usually be one
+# of the arguments to the script calling this
+# function)
+
+# Call this near the start of the script
+
+# Note that selfwaitstop or closeExtraFD
+# should be called before launching 
+# any daemons from the caller (otherwise
+# this lock will persist in the daemon)
+
+# Of course, when using this, recursive 
+# calls by the caller to itself will not work
+function selfwait {
+    local timeout=$1
+    # flavor is optional way to limit locking to a specific set of arguments
+    local flavor="$2"
+    local exedir="$(echo "$global_exedir" | sed -e 's|/|_|g')"
+    local lockfile="/tmp/.${exedir}__${global_exename}.lock"
+    if [[ ! -z $flavor ]] ; then
+        lockfile+=".$flavor"
+    fi
+    if [[ ! -f "$lockfile" ]] ; then
+        touch "$lockfile"
+        chmod 777 "$lockfile"
+    fi
+    if [[ -z $timeout ]] ; then
+        # default to 60 second timeout
+        timeout=60
+    fi
+    
+    export selfwait_LOCKFD=$(getfreefd)
+    eval "exec $selfwait_LOCKFD< '$lockfile'"
+    flock -w $timeout $selfwait_LOCKFD
+    res=$?
+    if [[ $res -ne 0 ]] ; then
+        if [[ ! -z $flavor ]] ; then
+            echo "$(tstamp) Could not acuire lock for script $global_exepath with flavor $flavor after wait of $timeout seconds; giving up"
+        else
+            echo "$(tstamp) Could not acuire lock for script $global_exepath after wait of $timeout seconds; giving up"
+        fi
+        exit 1
+    fi
+}
+# Call this to stop a lock generated by selfwait
+# before the end of the caller script
+function selfwaitstop {
+    eval "exec $selfwait_LOCKFD>&-"
+}
+
+# clase all file descriptors except stdin, stdout, stderr and 255 (bash terminal I/O?)
+# for use with launching daemons (one way to help with clearing selfwait lock
+# for this case)
+function closeExtraFD {
+    for fd in $(ls /proc/$$/fd); do
+        case "$fd" in
+          0|1|2|255)
+            ;;
+          *)
+            eval "exec $fd>&-"
+            ;;
+        esac
+    done
+}
+
+# this is a simple facility for creating a set of 
+# tracking files at the given path prefix in order 
+# to track the start and completion of the last 
+# successful activity.
+# The main usage is to get a file with a modification
+# time of the start of last successful completed run.
+# This is retrieved when starting the new run and 
+# represents the earliest time that the task may
+# have been performed.
+#
+# To make this work:
+# call this at the start of the task:
+# laststartfile=$(tracksync start <path>)
+#
+# call this at the successful completion of the task:
+# tracksync end <path>
+#
+# laststartfile will have a modification time of the beginning
+# of the most recent successful run
+function tracksync {
+    local action="$1"
+    local pathprefix="$2"
+    local aarg1="$3"
+    # synch start file
+    local sstart="${pathprefix}.synchstart"
+    # synch end file
+    local send="${pathprefix}.synchend"
+    # last good synch start file
+    local lgsstart="${pathprefix}.lastgoodsynchstart"
+    # last good synch end file
+    local lgsend="${pathprefix}.lastgoodsynchend"
+
+    if [[ $action == start ]] ; then
+        # update last good run markers to limit
+        # what we try to sync
+        if [[ -f "$sstart" && -f "$send" ]] ; then
+            if [[ ! "$sstart" -nt "$send" ]] ; then
+                cp -a "$sstart" "$lgsstart"
+                cp -a "$send" "$lgsend"
+            fi
+        fi
+        # if we don't have a last good marker, create one
+        # that is at the beginning of time ;) (epoch 0)
+        if [[ ! -f "$lgsstart" ]] ; then
+            touch -d @0 "$lgsstart"
+        fi
+        # reset start marker
+        touch "$sstart"
+        # remove end marker
+        rm -f "$send"
+    
+        # provide the filename to use for the start time of this run
+        echo "$lgsstart"
+        return
+    elif [[ $action == end ]] ; then
+        # set end of run marker
+        touch "$send"
+    elif [[ $action == set ]] ; then
+        # set sync time to the date in aarg1
+        local stime=$aarg1
+        touch -d "$stime" "$sstart"
+        touch -d "$stime" "$send"
+    else
+        echo "Invalid call to tracksync (action was $action)" 1>&2
+        exit 1
+    fi
+}
+# export for use in items like find -exec
+export -f tracksync
+
+################################################################################
+# persistent datastore
+###############
+
+# These functions are to be used as follows:
+# If multiple datastores are required or if they must persist
+# beyond the life of the script, you must first use setdatastore 
+# to define a directory in which the data is and/or will be kept.
+# The directory does not have to exist.
+# e.g. 
+# setdatastore "$HOME/mydatastores/$(date +%Y%M%D)"
+# 
+# Then, just set and get the data by "domain" (maps to a file)
+# "item" (variable within the domain) and value with optional
+# specification of type and action
+# e.g.
+# setdata dayofweek Friday
+# and
+# dow=$(getdata dayofweek)
+#
+# see the functions for more details
+
+global_butil1_pds_dir=""
+global_butil1_pds_dir_default=""
+
+function setdatastore {
+    local dsdir="$1"
+    if [[ $dsdir == default ]] ; then 
+        if [[ -z $global_butil1_pds_dir_default ]] ; then
+            global_butil1_pds_dir=$(blmktemp -d)
+            global_butil1_pds_dir_default=$global_butil1_pds_dir
+        fi
+        global_butil1_pds_dir=$global_butil1_pds_dir_default
+        return
+    fi
+    if [[ ! $dsdir =~ ^/[[:alpha:]] ]] ; then 
+        echo "Invalid directory name format passed to setdatastore: '$dsdir'"
+        exit 1
+    fi
+    if [[ ! -d "$dsdir" ]] ; then 
+        local res=0
+        mkdir -p "$dsdir" > /dev/null 2>&1 || res=$?
+        if [[ $res -ne 0 ]] ; then 
+            echo "Unable to create directory '$dsdir' in setdatastore."
+            exit 1
+        fi
+    fi
+    global_butil1_pds_dir="$dsdir"
+}
+function getdatastore {
+    if [[ -z $global_butil1_pds_dir ]] ; then
+        setdatastore default
+    fi
+    echo -n "$global_butil1_pds_dir"
+}
+
+function modifydata {
+    local file=$1
+    local item=$2
+    local value="$3"
+    local vaction=$4
+    local tfile=""
+    touch "$file"
+    if [[ -z $vaction ]] ; then
+        vaction=override
+    fi
+    if ! grep -E "^$item:" "$file" > /dev/null 2>&1 ; then
+        if [[ $vaction == override ]] ; then 
+            vaction=add
+        fi
+    fi
+    if [[ $vaction == delete ]] ; then
+        sed -i "/^$item/d" "$file"
+    elif [[ $vaction == override ]] ; then
+        sed -i -e "s|^$item.*|$item:$value|" "$file"
+    elif [[ $vaction == add ]] ; then
+        tfile=$(blmktemp)
+        cp -a "$file" $tfile
+        echo "$item:$value" >> $tfile
+        sort $tfile > "$file"
+    fi 
+}
+
+function getdata {
+    local domain=$1
+    local item=$2
+    local ds=$(getdatastore)
+    local file="$ds/$domain"
+    if [[ ! -f "$file" ]] ; then
+        echo -n ""
+        return  
+    fi
+    local valline="$(grep -E "^$item:" "$file")"
+    local value="${valline#*:}"
+    echo -n "$value"
+}
+function setdata {
+    local domain=$1
+    local item=$2
+    local value=$3
+    local vtype=$4
+    local vaction=$5
+    local ds=$(getdatastore)
+    local file="$ds/$domain"
+
+    if [[ -z $vtype ]] ; then
+        vtype=string
+    fi
+    if [[ -z $vaction ]] ; then
+        if [[ $vtype == list ]] ; then
+            vaction=append
+        else
+            vaction=overwrite
+        fi
+    fi
+
+    if [[ $vaction == overwrite ]] ; then
+        modifydata "$file" "$item" "$value"
+    elif [[ $vaction == append ]] ; then
+        ovalue="$(getdata $domain $item)"
+        nvalue="$ovalue $value"
+        modifydata "$file" "$item" "$nvalue"
+    fi
+}
+
+################################################################################
+# File tools
+###############
+
+
+
+
+# combine two files using various simple techniques
+# methods are:
+#    sortu - do a sort -u of the combined file 
+#
+# outfile is the original and final file name
+#
+# newfile is the file to combine with outfile
+function fcombine {
+    local method="$1"
+    local outfile="$2"
+    local newfile="$3"
+
+    local tmpfile=$(blmktemp)
+
+    (local LOCKFD=$(getfreefd)
+    eval "exec $LOCKFD>> '$outfile'"
+    flock $LOCKFD
+    if [[ $method == 'sortu' ]] ; then
+        cat "$outfile" "$newfile" | sort -u > "$tmpfile"
+    else
+        echo "Invalid method '$method' passed to fcombine" 1>&2
+        exit 1
+    fi
+    cp "$tmpfile" "$outfile"
+    eval "exec $LOCKFD>&-"
+    )
+}
+# export for use in items like find -exec
+export -f fcombine
+
+################################################################################
+function setupDir {
+    local sdir="$1"
+    if [[ -d "$sdir" ]] ; then return ; fi
+    local smode="$2"
+    local parent=$(dirname "$sdir")
+    if [[ ! -d "$parent" ]] ; then
+        setupDir "$parent" "$smode"
+    fi
+    mkdir -m "$smode" "$sdir"
+}
+# export for use in items like find -exec
+export -f setupDir
+
+# given a file path and file mode arguments,
+# create the empty file and any necessary directories
+# sfile = path to the file
+# sdmode = mode to apply (octal form) in all directories that need to be created 
+#   to fill out the path
+# sfmode = optional mode (octal form) to apply to the empty file
+function setupFile {
+    local sfile="$1"
+    local sdmode="$2"
+    local sfmode="$3"
+    if [[ -f "$sfile" ]] ; then return ; fi
+    local sdir=$(dirname "$sfile")
+    setupDir "$sdir" "$sdmode"
+    touch "$sfile"
+    if [[ ! -z $sfmode ]] ; then
+        chmod $sfmode "$sfile"
+    fi
+}
+# export for use in items like find -exec
+export -f setupFile
+
+################################################################################
+# getModificationTime "$path"
+# returns the modification time for the file in epoch seconds
+# if the optoinal second argument is 'ns', then the output format 
+# is seconds.nanoseconds
+function getModificationTime {
+    local fpath="$1"
+    local format="$2"
+    if [[ $format == ns ]] ; then
+        echo $(ls -ld --time-style=+%s.%N "$fpath" | sed -e 's|.* \([0-9]\{9,\}\.[0-9]\{9,9\}\) .*|\1|')
+    else
+        echo $(ls -ld --time-style=+%s "$fpath" | sed -e 's|.* \([0-9]\{9,\}\) .*|\1|')
+    fi
+}
+# export for use in items like find -exec
+export -f getModificationTime
+# matchModificationTime "$inpath" "$output"
+function matchModificationTime {
+    local inpath="$1"
+    local outpath="$2"
+    local etime=$(getModificationTime "$inpath" ns)
+    touch -d @$etime "$outpath"
+}
+# export for use in items like find -exec
+export -f matchModificationTime
+
+
+################################################################################
+# Network tools
+###############
+
+# Port Usage
+######
+
+# portInUse $port [udp|tcp [4|6]]
+function portInUse() (
+    port=$1
+    transport=$2
+    ipver=$3
+    cmd="netstat -an | grep LISTEN | "
+    if [[ $transport == tcp || $transport == udp ]] ; then
+        if [[ $ipver == 4 ]] ; then
+            cmd+=" grep '$transport ' | "
+        elif [[ $ipver == 6 ]] ; then
+            cmd+=" grep '${transport}6 ' | "
+        elif [[ -z $ipver ]] ; then
+            cmd+=" grep ${transport} | "
+        else
+            return 1
+        fi
+    elif [[ ! -z $transport ]] ; then
+        return 1
+    fi
+    eval "$cmd grep ':$port '" > /dev/null 2>&1
+    return $?
+)
+
+################################################################################
+
